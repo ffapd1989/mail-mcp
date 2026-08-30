@@ -92,6 +92,20 @@ impl MailImapServer {
                 config.ews_oauth2_accounts.clone(),
             )))
         };
+        let mut tool_router = Self::tool_router();
+        let delete_enabled = std::env::var("MAIL_IMAP_DELETE_ENABLED")
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        if !delete_enabled {
+            for tool_name in [
+                "imap_delete_message",
+                "imap_bulk_delete",
+                "imap_search_and_delete",
+                "imap_delete_mailbox",
+            ] {
+                tool_router.remove_route(tool_name);
+            }
+        }
         Self {
             config: Arc::new(config),
             cursors: Arc::new(Mutex::new(cursor_store)),
@@ -99,7 +113,7 @@ impl MailImapServer {
             graph_token_manager,
             ews_token_manager,
             update_notice,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 
