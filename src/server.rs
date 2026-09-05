@@ -3264,9 +3264,10 @@ impl MailImapServer {
 
     /// Save a sent message to the IMAP Sent folder.
     ///
-    /// Attempts to detect the correct Sent folder name for the provider.
     /// Archive the exact RFC822 bytes that SMTP just sent to the recipient's
-    /// server into the account's Sent folder via IMAP APPEND.
+    /// server into the account's Sent folder via IMAP APPEND. The folder is
+    /// chosen by `choose_sent_folder`, which never picks a mailbox shared by
+    /// another account.
     ///
     /// `rfc822` must be the complete, already-serialized message (headers +
     /// MIME parts + boundaries). The caller should pass `SentMessage.rfc822`
@@ -3285,14 +3286,49 @@ impl MailImapServer {
                 .await?;
 
         let mailboxes = imap::list_all_mailboxes(&self.config, &mut session).await?;
-        let sent_folder = mailboxes
-            .iter()
-            .map(|m| m.name().to_owned())
-            .find(|name| is_sent_folder_name(name))
-            .unwrap_or_else(|| "Sent".to_owned());
+        let sent_folder = choose_sent_folder(mailboxes.iter().map(|m| (m.name(), m.delimiter())));
 
         imap::append(&self.config, &mut session, &sent_folder, rfc822).await?;
         Ok(())
+    }
+}
+
+/// Pick the account's own Sent folder out of a LIST result.
+///
+/// Mailboxes shared with the user are mounted by Zimbra (and others) as
+/// top-level folders named after the owning account, e.g.
+/// `acervo@example.org/Sent`. They are somebody else's mailbox — the user may
+/// only be a reader there — so they are never candidates, no matter how much
+/// their name looks like a Sent folder. Among the remaining candidates the
+/// shallowest path wins (a top-level `Sent` beats `Archive/Sent`), and ties
+/// keep LIST order. Falls back to the literal `"Sent"` when nothing matches.
+fn choose_sent_folder<'a, I>(mailboxes: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
+{
+    mailboxes
+        .into_iter()
+        .filter(|(name, delimiter)| !is_shared_mailbox_path(name, *delimiter))
+        .filter(|(name, _)| is_sent_folder_name(name))
+        .min_by_key(|(name, delimiter)| mailbox_depth(name, *delimiter))
+        .map(|(name, _)| name.to_owned())
+        .unwrap_or_else(|| "Sent".to_owned())
+}
+
+/// A path whose top-level segment is an e-mail address belongs to another
+/// account's mailbox that was shared with this user.
+fn is_shared_mailbox_path(name: &str, delimiter: Option<&str>) -> bool {
+    let top_level = match delimiter {
+        Some(delimiter) if !delimiter.is_empty() => name.split(delimiter).next().unwrap_or(name),
+        _ => name,
+    };
+    top_level.contains('@')
+}
+
+fn mailbox_depth(name: &str, delimiter: Option<&str>) -> usize {
+    match delimiter {
+        Some(delimiter) if !delimiter.is_empty() => name.matches(delimiter).count(),
+        _ => 0,
     }
 }
 
@@ -4282,9 +4318,59 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
-        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_text,
+        choose_sent_folder, encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
+        is_shared_mailbox_path, validate_email_no_wrapper_leak, validate_flag, validate_mailbox,
+        validate_search_text,
     };
+
+    #[test]
+    fn choose_sent_folder_never_picks_a_shared_mailbox_even_when_listed_first() {
+        // Zimbra lists mailboxes shared with the user before the user's own
+        // folders; `acervo@…/Sent` is the owner's Sent, not this account's.
+        let listed = [
+            ("INBOX", Some("/")),
+            ("team@example.org/Sent", Some("/")),
+            ("billing@example.org/Sent", Some("/")),
+            ("Drafts", Some("/")),
+            ("Sent", Some("/")),
+        ];
+        assert_eq!(choose_sent_folder(listed), "Sent");
+    }
+
+    #[test]
+    fn choose_sent_folder_falls_back_instead_of_using_a_shared_mailbox() {
+        let listed = [("INBOX", Some("/")), ("team@example.org/Sent", Some("/"))];
+        assert_eq!(choose_sent_folder(listed), "Sent");
+    }
+
+    #[test]
+    fn choose_sent_folder_prefers_the_shallowest_candidate() {
+        let listed = [
+            ("Archive/Sent", Some("/")),
+            ("Sent Items", Some("/")),
+            ("Sent", Some("/")),
+        ];
+        assert_eq!(choose_sent_folder(listed), "Sent Items");
+    }
+
+    #[test]
+    fn choose_sent_folder_keeps_gmail_nested_sent_when_it_is_the_only_one() {
+        let listed = [("INBOX", Some("/")), ("[Gmail]/Sent Mail", Some("/"))];
+        assert_eq!(choose_sent_folder(listed), "[Gmail]/Sent Mail");
+    }
+
+    #[test]
+    fn shared_mailbox_detection_looks_at_the_top_level_segment_only() {
+        assert!(is_shared_mailbox_path("team@example.org/Sent", Some("/")));
+        assert!(is_shared_mailbox_path("team@example.org", Some("/")));
+        assert!(is_shared_mailbox_path("shared@example.org.Sent", Some(".")));
+        assert!(!is_shared_mailbox_path("Sent", Some("/")));
+        assert!(!is_shared_mailbox_path(
+            "Clientes/joao@example.org",
+            Some("/")
+        ));
+        assert!(!is_shared_mailbox_path("INBOX/pendentes", None));
+    }
 
     #[test]
     fn sent_folder_detection_covers_common_providers() {
