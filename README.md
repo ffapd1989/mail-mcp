@@ -440,6 +440,7 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "work"`,
 | `MAIL_SMTP_<ID>_USER` | Yes | — | Username |
 | `MAIL_SMTP_<ID>_PASS` | No | — | Password (optional with OAuth2) |
 | `MAIL_SMTP_<ID>_SECURE` | No | starttls | `starttls`, `tls`, or `plain` |
+| `MAIL_SMTP_<ID>_FROM_NAME` | No | — | Display name for the `From` header (`"Name" <user>`) |
 
 ### OAuth2 (per account)
 

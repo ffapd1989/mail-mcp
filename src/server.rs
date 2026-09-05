@@ -2854,7 +2854,7 @@ impl MailImapServer {
         let attachments = decode_attachments(&input.attachments)?;
 
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: smtp_config.from_header(),
             to: input.to.clone(),
             cc: input.cc.clone(),
             bcc: input.bcc.clone(),
@@ -2996,7 +2996,7 @@ impl MailImapServer {
         }
 
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: smtp_config.from_header(),
             to: to.clone(),
             cc,
             bcc: vec![],
@@ -3105,7 +3105,7 @@ impl MailImapServer {
         let smtp_config = self.config.get_smtp_account(&input.account_id)?;
 
         let composition = smtp::EmailComposition {
-            from: smtp_config.user.clone(),
+            from: smtp_config.from_header(),
             to: input.to.clone(),
             cc: vec![],
             bcc: vec![],

@@ -20,7 +20,7 @@ use std::time::Duration;
 use lettre::message::header::ContentType;
 use lettre::message::{Mailbox, MessageBuilder, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::AuthMethod;
@@ -79,6 +79,20 @@ pub struct SmtpAccountConfig {
     /// `Some(true/false)` = explicit per-account choice via
     /// `MAIL_SMTP_<ID>_SAVE_SENT`.
     pub save_sent: Option<bool>,
+    /// Display name for the `From` header, from `MAIL_SMTP_<ID>_FROM_NAME`.
+    /// `None` sends the bare address.
+    pub from_name: Option<String>,
+}
+
+impl SmtpAccountConfig {
+    /// The `From` header value: `"Name" <user>` when a display name is
+    /// configured and the user is a valid address, the bare user otherwise.
+    pub fn from_header(&self) -> String {
+        match (&self.from_name, self.user.parse::<Address>()) {
+            (Some(name), Ok(address)) => Mailbox::new(Some(name.clone()), address).to_string(),
+            _ => self.user.clone(),
+        }
+    }
 }
 
 // ─── Email composition ───────────────────────────────────────────────────────
@@ -558,6 +572,49 @@ mod tests {
         let bytes = msg.formatted();
         std::fs::write("/tmp/mail-mcp-sample.eml", &bytes).unwrap();
         println!("wrote /tmp/mail-mcp-sample.eml — {} bytes", bytes.len());
+    }
+
+    fn smtp_account(from_name: Option<&str>) -> SmtpAccountConfig {
+        SmtpAccountConfig {
+            account_id: "default".to_owned(),
+            host: "smtp.example.org".to_owned(),
+            port: 465,
+            user: "ana@example.org".to_owned(),
+            pass: None,
+            security: SmtpSecurity::Tls,
+            auth_method: AuthMethod::Password,
+            save_sent: None,
+            from_name: from_name.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn from_header_carries_the_display_name_and_round_trips() {
+        let header = smtp_account(Some("Ana Ribeiro de Souza")).from_header();
+        let mailbox: Mailbox = header.parse().unwrap();
+        assert_eq!(mailbox.name.as_deref(), Some("Ana Ribeiro de Souza"));
+        assert_eq!(mailbox.email.to_string(), "ana@example.org");
+        assert!(
+            build_message(&EmailComposition {
+                from: header,
+                to: vec!["b@example.org".to_owned()],
+                cc: vec![],
+                bcc: vec![],
+                subject: "x".to_owned(),
+                body_text: Some("y".to_owned()),
+                body_html: None,
+                reply_to: None,
+                in_reply_to: None,
+                references: None,
+                attachments: vec![],
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn from_header_without_display_name_is_the_bare_address() {
+        assert_eq!(smtp_account(None).from_header(), "ana@example.org");
     }
 
     #[test]
