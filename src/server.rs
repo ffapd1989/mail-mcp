@@ -958,6 +958,8 @@ impl ServerHandler for MailImapServer {
                 "Then ask for explicit confirmation. Never send without approval.\n\n",
                 "ATTACHMENTS: Use file_path (preferred) for files on disk: ",
                 "{\"file_path\": \"/path/to/file.pdf\"}. Filename and MIME type auto-detected. ",
+                "file_path is read from the disk of the machine running THIS server: if this server is ",
+                "remote and the file is on the client, prefer a mail-mcp instance running on the client. ",
                 "Use content_base64 only for small inline content. All fields except file_path or content_base64 are optional.\n\n",
                 "FORMATTING: For human-to-human correspondence (replies to clients, forwards, outreach), ",
                 "send BOTH body_text AND body_html as SEPARATE fields (per HARD RULE #1) so clients ",
@@ -4054,14 +4056,7 @@ fn decode_attachments(inputs: &[AttachmentInput]) -> AppResult<Vec<smtp::EmailAt
         .map(|a| {
             // Read content from file_path or decode base64
             let (content, resolved_filename) = if let Some(ref path) = a.file_path {
-                let content = std::fs::read(path).map_err(|e| {
-                    AppError::InvalidInput(format!("cannot read attachment file '{}': {e}", path))
-                })?;
-                let fname = std::path::Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "attachment".to_owned());
-                (content, fname)
+                read_attachment_file(path)?
             } else if let Some(ref b64) = a.content_base64 {
                 let content = base64::engine::general_purpose::STANDARD
                     .decode(b64)
@@ -4104,15 +4099,11 @@ fn decode_attachments(inputs: &[AttachmentInput]) -> AppResult<Vec<smtp::EmailAt
 fn resolve_attachment_base64(a: &AttachmentInput) -> AppResult<(String, String)> {
     use base64::Engine;
     if let Some(ref path) = a.file_path {
-        let content = std::fs::read(path).map_err(|e| {
-            AppError::InvalidInput(format!("cannot read attachment file '{}': {e}", path))
-        })?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&content);
-        let fname = std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "attachment".to_owned());
-        Ok((b64, fname))
+        let (content, fname) = read_attachment_file(path)?;
+        Ok((
+            base64::engine::general_purpose::STANDARD.encode(&content),
+            fname,
+        ))
     } else if let Some(ref b64) = a.content_base64 {
         Ok((
             b64.clone(),
@@ -4125,6 +4116,23 @@ fn resolve_attachment_base64(a: &AttachmentInput) -> AppResult<(String, String)>
             "attachment must have either 'file_path' or 'content_base64'".to_owned(),
         ))
     }
+}
+
+/// Read an attachment from the disk of the host running this server. Returns (content, filename).
+fn read_attachment_file(path: &str) -> AppResult<(Vec<u8>, String)> {
+    let content = std::fs::read(path).map_err(|e| {
+        AppError::InvalidInput(format!(
+            "cannot read attachment file '{path}' on the host running mail-mcp ({}): {e}. \
+             file_path is resolved on this server's disk, not the client's; if the file lives \
+             on another machine, send through a mail-mcp instance running there or use content_base64",
+            std::env::consts::OS
+        ))
+    })?;
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".to_owned());
+    Ok((content, filename))
 }
 
 /// Guess MIME type from file extension
@@ -4318,10 +4326,42 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 /// Tests for server-side validation and encoding helpers.
 mod tests {
     use super::{
-        choose_sent_folder, encode_raw_source_base64, escape_imap_quoted, is_sent_folder_name,
-        is_shared_mailbox_path, validate_email_no_wrapper_leak, validate_flag, validate_mailbox,
-        validate_search_text,
+        AttachmentInput, choose_sent_folder, decode_attachments, encode_raw_source_base64,
+        escape_imap_quoted, is_sent_folder_name, is_shared_mailbox_path,
+        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_text,
     };
+
+    #[test]
+    fn attachment_file_path_reads_zip_from_disk() {
+        let path = std::env::temp_dir().join("mail-mcp-attachment-test.zip");
+        std::fs::write(&path, b"PK\x03\x04").expect("write temp zip");
+        let input = AttachmentInput {
+            file_path: Some(path.display().to_string()),
+            ..Default::default()
+        };
+        let decoded = decode_attachments(&[input]).expect("decode");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(decoded[0].filename, "mail-mcp-attachment-test.zip");
+        assert_eq!(decoded[0].content_type, "application/zip");
+        assert_eq!(decoded[0].content, b"PK\x03\x04");
+    }
+
+    #[test]
+    fn missing_attachment_file_says_path_is_resolved_on_the_server_host() {
+        let input = AttachmentInput {
+            file_path: Some("C:\\no-such-dir\\archive.zip".to_owned()),
+            ..Default::default()
+        };
+        let message = decode_attachments(&[input])
+            .err()
+            .expect("missing file must fail")
+            .to_string();
+        assert!(
+            message.contains("on the host running mail-mcp"),
+            "{message}"
+        );
+        assert!(message.contains("not the client's"), "{message}");
+    }
 
     #[test]
     fn choose_sent_folder_never_picks_a_shared_mailbox_even_when_listed_first() {

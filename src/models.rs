@@ -544,7 +544,8 @@ pub struct AttachmentInput {
     /// Base64-encoded file content (use for small files)
     #[serde(default)]
     pub content_base64: Option<String>,
-    /// Local file path (use for large files — MCP reads the file directly)
+    /// Path on the machine running this MCP server (use for large files — the server reads it
+    /// directly; a remote server cannot see the client's disk)
     #[serde(default)]
     pub file_path: Option<String>,
 }
@@ -577,7 +578,7 @@ pub struct SmtpSendMessageInput {
     pub in_reply_to: Option<String>,
     /// References header for threading (optional)
     pub references: Option<String>,
-    /// File attachments (optional, base64-encoded)
+    /// File attachments (optional; each by `file_path` or `content_base64`)
     #[serde(default)]
     pub attachments: Vec<AttachmentInput>,
 }
@@ -603,7 +604,7 @@ pub struct SmtpReplyMessageInput {
     /// Include original email's attachments in the reply (default: false)
     #[serde(default)]
     pub include_original_attachments: bool,
-    /// Additional file attachments (optional, base64-encoded)
+    /// Additional file attachments (optional; each by `file_path` or `content_base64`)
     #[serde(default)]
     pub attachments: Vec<AttachmentInput>,
 }
@@ -673,7 +674,7 @@ pub struct GraphSendMessageInput {
     /// Save to Sent Items folder (default: true)
     #[serde(default = "default_true")]
     pub save_to_sent: bool,
-    /// File attachments (optional, base64-encoded)
+    /// File attachments (optional; each by `file_path` or `content_base64`)
     #[serde(default)]
     pub attachments: Vec<AttachmentInput>,
 }

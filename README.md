@@ -359,7 +359,7 @@ Send files with any send tool. Two modes:
 "attachments": [{"filename": "note.txt", "content_type": "text/plain", "content_base64": "SGVsbG8="}]
 ```
 
-Filename and MIME type are auto-detected from the file path. Reply with `include_original_attachments: true` to forward original attachments.
+`file_path` is read from the disk of the machine running the server: a remote instance (behind an HTTP proxy, in Docker) cannot see the client's files. Filename and MIME type are auto-detected from the file path. Reply with `include_original_attachments: true` to forward original attachments.
 
 ### Bulk Operations (2 tools)
 
