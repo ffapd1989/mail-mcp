@@ -2447,7 +2447,7 @@ impl MailImapServer {
         // Search (read-only SELECT via EXAMINE)
         let uidvalidity =
             imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await?;
-        let query = build_search_query(&search_input)?;
+        let query = search_query_for_session(&self.config, &mut session, &search_input).await?;
         let all_uids = imap::uid_search(&self.config, &mut session, &query).await?;
 
         let total_matched = all_uids.len();
@@ -2562,7 +2562,7 @@ impl MailImapServer {
 
         let uidvalidity =
             imap::select_mailbox_readonly(&self.config, &mut session, &input.mailbox).await?;
-        let query = build_search_query(&search_input)?;
+        let query = search_query_for_session(&self.config, &mut session, &search_input).await?;
         let all_uids = imap::uid_search(&self.config, &mut session, &query).await?;
 
         let total_matched = all_uids.len();
@@ -3662,7 +3662,7 @@ async fn start_new_search(
     session: &mut imap::ImapSession,
     input: &SearchMessagesInput,
 ) -> AppResult<SearchSnapshot> {
-    let query = build_search_query(input)?;
+    let query = search_query_for_session(config, session, input).await?;
     let searched_uids = imap::uid_search(config, session, &query).await?;
     if searched_uids.len() > MAX_CURSOR_UIDS_STORED {
         return Err(AppError::InvalidInput(format!(
@@ -3900,20 +3900,56 @@ fn validate_search_text(input: &str) -> AppResult<()> {
     validate_no_controls(input, "search text")
 }
 
+fn search_text_fields(input: &SearchMessagesInput) -> [(&'static str, Option<&String>); 4] {
+    [
+        ("TEXT", input.query.as_ref()),
+        ("FROM", input.from.as_ref()),
+        ("TO", input.to.as_ref()),
+        ("SUBJECT", input.subject.as_ref()),
+    ]
+}
+
+fn search_needs_utf8(input: &SearchMessagesInput) -> bool {
+    search_text_fields(input)
+        .iter()
+        .any(|(_key, value)| value.is_some_and(|text| !text.is_ascii()))
+}
+
+/// Build the SEARCH query, asking for the capability check only when some text is not ASCII.
+async fn search_query_for_session(
+    config: &ServerConfig,
+    session: &mut imap::ImapSession,
+    input: &SearchMessagesInput,
+) -> AppResult<String> {
+    let non_sync_literals = if search_needs_utf8(input) {
+        let capabilities = imap::capabilities(config, session).await?;
+        capabilities.has_str("LITERAL+") || capabilities.has_str("LITERAL-")
+    } else {
+        false
+    };
+    build_search_query(input, non_sync_literals)
+}
+
 /// Build IMAP SEARCH query string from input
-fn build_search_query(input: &SearchMessagesInput) -> AppResult<String> {
+///
+/// Quoted strings are 7-bit only (servers such as Zimbra reject 8-bit bytes in
+/// them), so non-ASCII text goes as a non-synchronizing literal under
+/// `CHARSET UTF-8` when the server allows it.
+fn build_search_query(input: &SearchMessagesInput, non_sync_literals: bool) -> AppResult<String> {
     let mut parts = Vec::new();
-    if let Some(v) = &input.query {
-        parts.push(format!("TEXT \"{}\"", escape_imap_quoted(v)?));
+    if search_needs_utf8(input) {
+        parts.push("CHARSET UTF-8".to_owned());
     }
-    if let Some(v) = &input.from {
-        parts.push(format!("FROM \"{}\"", escape_imap_quoted(v)?));
-    }
-    if let Some(v) = &input.to {
-        parts.push(format!("TO \"{}\"", escape_imap_quoted(v)?));
-    }
-    if let Some(v) = &input.subject {
-        parts.push(format!("SUBJECT \"{}\"", escape_imap_quoted(v)?));
+    for (key, value) in search_text_fields(input) {
+        if let Some(text) = value {
+            let argument = if text.is_ascii() || !non_sync_literals {
+                format!("\"{}\"", escape_imap_quoted(text)?)
+            } else {
+                validate_search_text(text)?;
+                format!("{{{}+}}\r\n{text}", text.len())
+            };
+            parts.push(format!("{key} {argument}"));
+        }
     }
     if input.unread_only.unwrap_or(false) {
         parts.push("UNSEEN".to_owned());
@@ -4395,6 +4431,45 @@ mod tests {
     };
 
     const UPLOAD_URL: &str = "https://mcp.example.org/secret/anexos/";
+
+    fn search_by_subject(subject: &str) -> super::SearchMessagesInput {
+        super::SearchMessagesInput {
+            account_id: "default".to_owned(),
+            mailbox: "INBOX".to_owned(),
+            cursor: None,
+            query: None,
+            from: None,
+            to: None,
+            subject: Some(subject.to_owned()),
+            unread_only: None,
+            last_days: None,
+            start_date: None,
+            end_date: None,
+            limit: 10,
+            include_snippet: false,
+            snippet_max_chars: None,
+        }
+    }
+
+    #[test]
+    fn ascii_search_text_stays_quoted_without_charset() {
+        let query = super::build_search_query(&search_by_subject("Roadmap"), true).expect("query");
+        assert_eq!(query, "SUBJECT \"Roadmap\"");
+    }
+
+    #[test]
+    fn accented_search_text_goes_as_utf8_literal() {
+        let query =
+            super::build_search_query(&search_by_subject("Relatório"), true).expect("query");
+        assert_eq!(query, "CHARSET UTF-8 SUBJECT {10+}\r\nRelatório");
+    }
+
+    #[test]
+    fn accented_search_text_stays_quoted_when_server_lacks_literal_plus() {
+        let query =
+            super::build_search_query(&search_by_subject("Relatório"), false).expect("query");
+        assert_eq!(query, "CHARSET UTF-8 SUBJECT \"Relatório\"");
+    }
 
     #[test]
     fn upload_hint_reaches_the_send_tools_that_take_attachments() {
