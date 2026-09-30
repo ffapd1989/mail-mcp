@@ -360,7 +360,7 @@ Server-wide:
 - `MAIL_IMAP_CONNECT_TIMEOUT_MS` (default `30000`)
 - `MAIL_IMAP_GREETING_TIMEOUT_MS` (default `15000`)
 - `MAIL_IMAP_SOCKET_TIMEOUT_MS` (default `300000`)
-- `MAIL_ATTACHMENT_UPLOAD_URL` (optional): an HTTP endpoint that stores a `PUT` body on this server's disk and answers `{"file_path", "size_bytes", "expires_at"}`. When set, the server instructions tell clients to upload local files there with `curl -T` before the preview, and a missing `file_path` error points to it. For remote deployments, where `file_path` cannot see the client's disk.
+- `MAIL_ATTACHMENT_UPLOAD_URL` (optional): an HTTP endpoint that stores a `PUT` body on this server's disk and answers `{"file_path", "size_bytes", "expires_at"}`. When set, the server instructions and the descriptions of `smtp_send_message`, `smtp_reply_message` and `graph_send_message` tell clients to upload local files there with `curl -T` before the preview (the descriptions matter because proxies such as `mcp-proxy` drop `instructions`), and a missing `file_path` error points to it. For remote deployments, where `file_path` cannot see the client's disk.
 
 ## Implementation Notes for Next Artifact
 

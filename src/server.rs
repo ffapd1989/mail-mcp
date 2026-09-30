@@ -106,6 +106,9 @@ impl MailImapServer {
                 tool_router.remove_route(tool_name);
             }
         }
+        if let Some(upload_url) = attachment_upload_url() {
+            append_upload_hint(&mut tool_router, &upload_url);
+        }
         Self {
             config: Arc::new(config),
             cursors: Arc::new(Mutex::new(cursor_store)),
@@ -4166,6 +4169,22 @@ fn attachment_upload_url() -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
+/// Proxies such as mcp-proxy drop the server `instructions`, so the upload hint also rides
+/// on the descriptions of the tools that take `attachments`.
+fn append_upload_hint(tool_router: &mut ToolRouter<MailImapServer>, upload_url: &str) {
+    let hint = upload_instructions(Some(upload_url));
+    for tool_name in [
+        "smtp_send_message",
+        "smtp_reply_message",
+        "graph_send_message",
+    ] {
+        if let Some(route) = tool_router.map.get_mut(tool_name) {
+            let description = route.attr.description.as_deref().unwrap_or_default();
+            route.attr.description = Some(format!("{description}\n\n{hint}").into());
+        }
+    }
+}
+
 fn upload_instructions(upload_url: Option<&str>) -> String {
     upload_url.map_or_else(String::new, |url| {
         format!(
@@ -4376,6 +4395,33 @@ mod tests {
     };
 
     const UPLOAD_URL: &str = "https://mcp.example.org/secret/anexos/";
+
+    #[test]
+    fn upload_hint_reaches_the_send_tools_that_take_attachments() {
+        let mut router = super::MailImapServer::tool_router();
+        super::append_upload_hint(&mut router, UPLOAD_URL);
+        let described: Vec<String> = router
+            .list_all()
+            .into_iter()
+            .filter(|tool| {
+                tool.description
+                    .as_deref()
+                    .is_some_and(|text| text.contains(UPLOAD_URL))
+            })
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(described.len(), 3, "{described:?}");
+        for tool_name in [
+            "smtp_send_message",
+            "smtp_reply_message",
+            "graph_send_message",
+        ] {
+            assert!(
+                described.iter().any(|name| name == tool_name),
+                "{described:?}"
+            );
+        }
+    }
 
     #[test]
     fn upload_instructions_are_silent_without_an_upload_url() {

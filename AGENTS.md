@@ -214,7 +214,7 @@ The repository publishes GitHub Release archives/installers via cargo-dist.
 - Maintain `ToolEnvelope` shape (`summary`, `data`, `meta`).
 - Keep `summary` concise and useful.
 - Ensure `meta.duration_ms` and `meta.now_utc` remain populated.
-- `MAIL_ATTACHMENT_UPLOAD_URL` (optional) adds the client-file upload paragraph to the server instructions and to the missing-attachment error; contract in `docs/tool-contract.md`.
+- `MAIL_ATTACHMENT_UPLOAD_URL` (optional) adds the client-file upload paragraph to the server instructions, to the send-tool descriptions and to the missing-attachment error; contract in `docs/tool-contract.md`.
 
 ### Testing Expectations
 
