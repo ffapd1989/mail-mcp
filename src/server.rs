@@ -961,6 +961,9 @@ impl ServerHandler for MailImapServer {
                 "file_path is read from the disk of the machine running THIS server: if this server is ",
                 "remote and the file is on the client, prefer a mail-mcp instance running on the client. ",
                 "Use content_base64 only for small inline content. All fields except file_path or content_base64 are optional.\n\n",
+            ).to_owned()
+                + &upload_instructions(attachment_upload_url().as_deref())
+                + concat!(
                 "FORMATTING: For human-to-human correspondence (replies to clients, forwards, outreach), ",
                 "send BOTH body_text AND body_html as SEPARATE fields (per HARD RULE #1) so clients ",
                 "render formatting (paragraphs, lists, links, bold) while keeping a plain-text fallback ",
@@ -970,7 +973,7 @@ impl ServerHandler for MailImapServer {
                 "Write: MAIL_IMAP_WRITE_ENABLED=true. Send: MAIL_SMTP_WRITE_ENABLED=true.\n",
                 "For OAuth2/Microsoft setup, call get_setup_guide tool.\n\n",
                 "Star the project: https://github.com/tecnologicachile/mail-mcp",
-            ).to_owned() + self.update_notice.as_deref().unwrap_or("")),
+            ) + self.update_notice.as_deref().unwrap_or("")),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -4121,11 +4124,10 @@ fn resolve_attachment_base64(a: &AttachmentInput) -> AppResult<(String, String)>
 /// Read an attachment from the disk of the host running this server. Returns (content, filename).
 fn read_attachment_file(path: &str) -> AppResult<(Vec<u8>, String)> {
     let content = std::fs::read(path).map_err(|e| {
-        AppError::InvalidInput(format!(
-            "cannot read attachment file '{path}' on the host running mail-mcp ({}): {e}. \
-             file_path is resolved on this server's disk, not the client's; if the file lives \
-             on another machine, send through a mail-mcp instance running there or use content_base64",
-            std::env::consts::OS
+        AppError::InvalidInput(missing_attachment_message(
+            path,
+            &e,
+            attachment_upload_url().as_deref(),
         ))
     })?;
     let filename = std::path::Path::new(path)
@@ -4133,6 +4135,47 @@ fn read_attachment_file(path: &str) -> AppResult<(Vec<u8>, String)> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "attachment".to_owned());
     Ok((content, filename))
+}
+
+fn missing_attachment_message(
+    path: &str,
+    error: &std::io::Error,
+    upload_url: Option<&str>,
+) -> String {
+    let remedy = match upload_url {
+        Some(url) => format!(
+            "if the file lives on the client, upload it first with curl -sS -T \"<file>\" \"{url}\" \
+             and use the file_path it returns"
+        ),
+        None => "if the file lives on another machine, send through a mail-mcp instance running \
+                 there or use content_base64"
+            .to_owned(),
+    };
+    format!(
+        "cannot read attachment file '{path}' on the host running mail-mcp ({}): {error}. \
+         file_path is resolved on this server's disk, not the client's; {remedy}",
+        std::env::consts::OS
+    )
+}
+
+/// Upload endpoint for files on the client machine (`MAIL_ATTACHMENT_UPLOAD_URL`).
+fn attachment_upload_url() -> Option<String> {
+    std::env::var("MAIL_ATTACHMENT_UPLOAD_URL")
+        .ok()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
+fn upload_instructions(upload_url: Option<&str>) -> String {
+    upload_url.map_or_else(String::new, |url| {
+        format!(
+            "UPLOADING A CLIENT FILE: this server cannot read the client's disk. When you can run \
+             shell commands on the user's machine, upload each local file BEFORE showing the \
+             preview: curl -sS -T \"<local file>\" \"{url}\" (keep the trailing slash; curl appends \
+             the file name). The JSON reply carries file_path (put it in attachments) and \
+             size_bytes (show it in the preview); the file is deleted after expires_at.\n\n"
+        )
+    })
 }
 
 /// Guess MIME type from file extension
@@ -4328,8 +4371,32 @@ mod tests {
     use super::{
         AttachmentInput, choose_sent_folder, decode_attachments, encode_raw_source_base64,
         escape_imap_quoted, is_sent_folder_name, is_shared_mailbox_path,
-        validate_email_no_wrapper_leak, validate_flag, validate_mailbox, validate_search_text,
+        missing_attachment_message, upload_instructions, validate_email_no_wrapper_leak,
+        validate_flag, validate_mailbox, validate_search_text,
     };
+
+    const UPLOAD_URL: &str = "https://mcp.example.org/secret/anexos/";
+
+    #[test]
+    fn upload_instructions_are_silent_without_an_upload_url() {
+        assert_eq!(upload_instructions(None), "");
+    }
+
+    #[test]
+    fn upload_instructions_tell_the_client_to_curl_before_the_preview() {
+        let text = upload_instructions(Some(UPLOAD_URL));
+        assert!(text.contains(&format!("curl -sS -T \"<local file>\" \"{UPLOAD_URL}\"")));
+        assert!(text.contains("BEFORE showing the preview"));
+    }
+
+    #[test]
+    fn missing_attachment_message_points_to_the_upload_url_when_set() {
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let with_url = missing_attachment_message("C:\\x.zip", &error, Some(UPLOAD_URL));
+        assert!(with_url.contains(UPLOAD_URL), "{with_url}");
+        let without_url = missing_attachment_message("C:\\x.zip", &error, None);
+        assert!(without_url.contains("content_base64"), "{without_url}");
+    }
 
     #[test]
     fn attachment_file_path_reads_zip_from_disk() {

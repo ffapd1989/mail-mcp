@@ -484,6 +484,7 @@ Use `account_id` in tool calls: `"account_id": "gmail"`, `"account_id": "work"`,
 | `MAIL_IMAP_CONNECT_TIMEOUT_MS` | 30000 | TCP connection timeout |
 | `MAIL_IMAP_GREETING_TIMEOUT_MS` | 15000 | TLS/greeting timeout |
 | `MAIL_IMAP_SOCKET_TIMEOUT_MS` | 300000 | Socket I/O timeout |
+| `MAIL_ATTACHMENT_UPLOAD_URL` | — | Endpoint where clients upload local files before attaching them (remote deployments); see `docs/tool-contract.md` |
 
 </details>
 
