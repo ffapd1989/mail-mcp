@@ -93,10 +93,7 @@ impl MailImapServer {
             )))
         };
         let mut tool_router = Self::tool_router();
-        let delete_enabled = std::env::var("MAIL_IMAP_DELETE_ENABLED")
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
-        if !delete_enabled {
+        if !delete_tools_enabled() {
             for tool_name in [
                 "imap_delete_message",
                 "imap_bulk_delete",
@@ -1701,6 +1698,7 @@ impl MailImapServer {
         }
         validate_flags(&add_flags, "add_flags")?;
         validate_flags(&remove_flags, "remove_flags")?;
+        enforce_flag_policy(&add_flags, &remove_flags)?;
 
         let msg_id = parse_and_validate_message_id(&input.account_id, &input.message_id)?;
         let encoded_message_id = msg_id.encode();
@@ -2747,6 +2745,10 @@ impl MailImapServer {
         if let Some(ref flags) = input.remove_flags {
             validate_flags(flags, "remove_flags")?;
         }
+        enforce_flag_policy(
+            input.add_flags.as_deref().unwrap_or_default(),
+            input.remove_flags.as_deref().unwrap_or_default(),
+        )?;
 
         let parsed = parse_bulk_message_ids(&input.account_id, &input.message_ids)?;
         let uid_set = parsed
@@ -4016,6 +4018,57 @@ fn validate_flag(flag: &str) -> AppResult<()> {
     Ok(())
 }
 
+const DELETED_FLAG: &str = "\\Deleted";
+
+fn delete_tools_enabled() -> bool {
+    std::env::var("MAIL_IMAP_DELETE_ENABLED")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(true)
+}
+
+fn enforce_flag_policy(add_flags: &[String], remove_flags: &[String]) -> AppResult<()> {
+    let allowed = std::env::var("MAIL_IMAP_ALLOWED_FLAGS").ok();
+    match flag_policy_violation(
+        add_flags,
+        remove_flags,
+        delete_tools_enabled(),
+        allowed.as_deref(),
+    ) {
+        Some(message) => Err(AppError::InvalidInput(message)),
+        None => Ok(()),
+    }
+}
+
+fn flag_policy_violation(
+    add_flags: &[String],
+    remove_flags: &[String],
+    delete_enabled: bool,
+    allowed: Option<&str>,
+) -> Option<String> {
+    if !delete_enabled
+        && add_flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case(DELETED_FLAG))
+    {
+        return Some(format!(
+            "adding {DELETED_FLAG} is disabled; set MAIL_IMAP_DELETE_ENABLED=true"
+        ));
+    }
+    let permitted: Vec<&str> = allowed?
+        .split(',')
+        .map(str::trim)
+        .filter(|flag| !flag.is_empty())
+        .collect();
+    if permitted.is_empty() {
+        return None;
+    }
+    add_flags
+        .iter()
+        .chain(remove_flags)
+        .find(|flag| !permitted.iter().any(|ok| ok.eq_ignore_ascii_case(flag)))
+        .map(|flag| format!("flag '{flag}' is outside MAIL_IMAP_ALLOWED_FLAGS"))
+}
+
 /// Format date as IMAP SEARCH date (e.g., "1-Jan-2025")
 fn imap_date(date: NaiveDate) -> String {
     date.format("%-d-%b-%Y").to_string()
@@ -4425,7 +4478,7 @@ fn parse_bulk_message_ids(account_id: &str, message_ids: &[String]) -> AppResult
 mod tests {
     use super::{
         AttachmentInput, choose_sent_folder, decode_attachments, encode_raw_source_base64,
-        escape_imap_quoted, is_sent_folder_name, is_shared_mailbox_path,
+        escape_imap_quoted, flag_policy_violation, is_sent_folder_name, is_shared_mailbox_path,
         missing_attachment_message, upload_instructions, validate_email_no_wrapper_leak,
         validate_flag, validate_mailbox, validate_search_text,
     };
@@ -4666,6 +4719,24 @@ mod tests {
     fn validate_flag_rejects_injection_like_value() {
         let err = validate_flag("\\Seen) UID FETCH 1:* (BODY[]").expect_err("must fail");
         assert!(err.to_string().contains("invalid flag"));
+    }
+
+    #[test]
+    fn flag_policy_refuses_deleted_only_when_delete_is_disabled() {
+        let deleted = vec!["\\deleted".to_owned()];
+        assert!(flag_policy_violation(&deleted, &[], false, None).is_some());
+        assert!(flag_policy_violation(&deleted, &[], true, None).is_none());
+        assert!(flag_policy_violation(&[], &deleted, false, None).is_none());
+    }
+
+    #[test]
+    fn flag_policy_limits_add_and_remove_to_the_allowlist() {
+        let flagged = vec!["\\Flagged".to_owned()];
+        let seen = vec!["\\Seen".to_owned()];
+        assert!(flag_policy_violation(&flagged, &flagged, false, Some("\\flagged")).is_none());
+        assert!(flag_policy_violation(&seen, &[], false, Some("\\Flagged")).is_some());
+        assert!(flag_policy_violation(&[], &seen, false, Some("\\Flagged")).is_some());
+        assert!(flag_policy_violation(&seen, &[], false, Some(" ")).is_none());
     }
 
     /// Tests that raw message sources are correctly base64 encoded.
